@@ -71,14 +71,14 @@ datasets['imagenet128'] = torchvision.datasets.ImageFolder(root="./data/imagenet
 batch_size = 128
 lr = 2e-4
 # categorical dimention
-K = 512
+K = 256
 # embedding size
-D = 128
+D = 64
 beta = 0.25 
 total_steps = 250000
 
-#dataset = 'cifar10' 
-dataset = 'imagenet128'
+dataset = 'cifar10' 
+#dataset = 'imagenet128'
 
 field_size = 8 if dataset== 'cifar10' else 32
 
