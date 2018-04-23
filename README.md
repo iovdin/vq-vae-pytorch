@@ -7,7 +7,7 @@ to reduce memory required to calculate distance to embeddings
 
 ## requirements
  - Python 3.6 
- - PyTorch 3.1
+ - PyTorch 0.3
  - TensorComprehensions
 
 # Training
