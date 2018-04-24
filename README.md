@@ -22,3 +22,6 @@ I used https://learning-rates.com to track model learning progress. It is off by
 
 ### ImageNet reconstruction after 40k iterations (K=512, D=128)
 ![ImageNet](./imagenet.jpg)
+
+# License
+MIT
