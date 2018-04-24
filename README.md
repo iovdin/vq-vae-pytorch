@@ -19,3 +19,6 @@ python vq-vae-img.py
 Edit hyperparams, paths in source code to train on ImageNet  
 
 I used https://learning-rates.com to track model learning progress. It is off by default, use ``--lrs`` to enable it.
+
+### ImageNet reconstruction after 40k iterations (K=512, D=128)
+![ImageNet](./imagenet.jpg)
