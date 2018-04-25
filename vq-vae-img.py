@@ -99,13 +99,14 @@ cross_dist_cuda = tc.define(cross_dist_lang, name="cross_dist")
 
 def min_dist(input, emb):
     if use_cuda:
-        return cross_dist_cuda(input, emb).min(1)[1]
+        return cross_dist_cuda(input, emb).sub(V(sensitivity.view(1, K, 1, 1))).min(1)[1]
 
     # cpu version
     return (input.permute(0, 2, 3, 1) # [batch_size, w, h, D]
              .unsqueeze(-2)           # [batch_size, w, h, 1, D]
              .sub(emb)                # [batch_size, w, h, K, D]
              .pow(2).sum(-1)          # [batch_size, w, h, K]
+             .sub(V(sensitivity.view(1, 1, 1, K)))
              .min(-1)[1])
 
 def train(epoch, step):
@@ -150,9 +151,13 @@ def train(epoch, step):
 
         emb_count[index.data.view(-1)] = 1
         emb_count.sub_(0.05).clamp_(min=0)
+        unique_embeddings = emb_count.gt(0).sum()
+
+        sensitivity.add_(emb_loss.data[0] * (K - unique_embeddings) / K)
+        sensitivity[emb_count.gt(0)] = 0
 
         if every_second():
-            print("step: {0:d}, recon_loss {1:.4f} commit_loss {2:.4f}, unique_embeddings: {3:d}".format(step, recon_loss.data[0], commit_loss.data[0], emb_count.gt(0).sum()))
+            print("step: {0:d}, recon_loss {1:.4f} commit_loss {2:.4f}, unique_embeddings: {3:d}".format(step, recon_loss.data[0], commit_loss.data[0], unique_embeddings))
 
         lrs.log({ 
             'recon_loss': recon_loss.data[0],
@@ -197,6 +202,7 @@ lrs.log_src(__file__)
 enc = encoder(D) 
 dec = decoder(D)
 embeddings = torch.randn(K, D).div(D)
+sensitivity = torch.zeros(K)
 
 # calculate number of embedding vectors used
 emb_count = torch.zeros(K)
@@ -206,6 +212,7 @@ if use_cuda:
     dec = dec.cuda()
     embeddings = embeddings.cuda()
     emb_count = emb_count.cuda()
+    sensitivity = sensitivity.cuda()
 
 embeddings = nn.Parameter(embeddings, requires_grad=True)
 optimizer = optim.Adam([ 
