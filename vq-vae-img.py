@@ -4,26 +4,25 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.datasets
 import torchvision.transforms as transforms
+import torchvision.utils
 from torch.autograd import Variable as V
 from torch.utils.data import DataLoader
 import tensor_comprehensions as tc
+import numpy
 
-import lrs
+import lera
 import argparse
 import utils
 import os
 
 parser = argparse.ArgumentParser(description='PyTorch VQ-VAE training on Cifar10 and ImageNet')
-parser.set_defaults(lrs=False)
+parser.set_defaults(lera=False)
 parser.set_defaults(no_cuda=False)
-parser.add_argument('--lrs', dest='lrs', action='store_true', help='Should i send training stats to https://learning-rates.com')
+parser.add_argument('--lera', dest='lera', action='store_true', help='Should i send training stats to https://learning-rates.com')
 parser.add_argument('--no-cuda', dest='no_cuda', action='store_true', help='Run on CPU')
 
 args = parser.parse_args()
 use_cuda = not args.no_cuda and torch.cuda.is_available()
-
-if not os.path.exists("./images"):
-    os.makedirs("./images")
 
 ## Model
 
@@ -71,7 +70,7 @@ datasets['imagenet128'] = torchvision.datasets.ImageFolder(root="./data/imagenet
 batch_size = 128
 lr = 2e-4
 # categorical dimention
-K = 256
+K = 64
 # embedding size
 D = 64
 beta = 0.25 
@@ -92,14 +91,24 @@ def cross_dist(float(N,C,H,W) X, float(K, C) EMB) -> (dist) {
 """
 cross_dist_cuda = tc.define(cross_dist_lang, name="cross_dist")
 
-## Uncomment if you want to optimize the cuda kernel
-#input = torch.randn(batch_size, D, field_size, field_size).cuda()
-#emb = torch.randn(K, D).cuda()
-#cross_dist.autotune(input, emb , cache=True)
+autotuned = dict()
+
+def autotune(batch_size, K, D, field_size):
+    global autotuned
+    cache_autotune = ".autotune_{0:02d}_{1:02d}_{2:02d}_{3:02d}".format(batch_size, K, D, field_size)
+    if autotuned.get(cache_autotune, None) is not None:
+        return cache_autotune
+    if not os.path.exists(cache_autotune + ".options") and use_cuda:
+        input = torch.randn(batch_size, D, field_size, field_size).cuda()
+        emb = torch.randn(K, D).cuda()
+        cross_dist_cuda.autotune(input, emb , cache=cache_autotune, generations=10)
+        autotuned[cache_autotune] = True
+    return cache_autotune
 
 def min_dist(input, emb):
     if use_cuda:
-        return cross_dist_cuda(input, emb).sub(V(sensitivity.view(1, K, 1, 1))).min(1)[1]
+        cache_autotune = autotune(input.size(0), emb.size(0), emb.size(1), input.size(2))
+        return cross_dist_cuda(input, emb, cache=cache_autotune).sub(V(sensitivity.view(1, K, 1, 1))).min(1)[1]
 
     # cpu version
     return (input.permute(0, 2, 3, 1) # [batch_size, w, h, D]
@@ -109,11 +118,13 @@ def min_dist(input, emb):
              .sub(V(sensitivity.view(1, 1, 1, K)))
              .min(-1)[1])
 
+emb_history = []
+
 def train(epoch, step):
-    lrs.log('epoch', epoch)
+    #lera.log('epoch', epoch)
     epoch += 1
 
-    for input, _ in DataLoader(datasets[dataset], batch_size=batch_size, pin_memory=use_cuda, num_workers=2, shuffle=True):
+    for input, _ in DataLoader(datasets[dataset], batch_size=batch_size, pin_memory=use_cuda, num_workers=2, shuffle=True, drop_last=True):
         if use_cuda:
             input = input.cuda()
 
@@ -128,7 +139,7 @@ def train(epoch, step):
                 .view(sz[0], sz[1], sz[2], D)  # [batch_size, x, x, D] 
                 .permute(0, 3, 1, 2))          # [batch_size, D, x, x]
 
-        emb_loss = (zq - V(ze.data)).pow(2).sum(1).mean()
+        emb_loss = (zq - V(ze.data)).pow(2).sum(1).mean() + 1e-2 * embeddings.pow(2).mean()
 
         # detach zq so it won't backprop to embeddings with recon loss
         zq = V(zq.data, requires_grad=True)
@@ -150,32 +161,29 @@ def train(epoch, step):
         optimizer.step()
 
         emb_count[index.data.view(-1)] = 1
-        emb_count.sub_(0.05).clamp_(min=0)
+        emb_count.sub_(0.01).clamp_(min=0)
         unique_embeddings = emb_count.gt(0).sum()
 
         sensitivity.add_(emb_loss.data[0] * (K - unique_embeddings) / K)
         sensitivity[emb_count.gt(0)] = 0
 
-        if every_second():
-            print("step: {0:d}, recon_loss {1:.4f} commit_loss {2:.4f}, unique_embeddings: {3:d}".format(step, recon_loss.data[0], commit_loss.data[0], unique_embeddings))
-
-        lrs.log({ 
+        lera.log({ 
             'recon_loss': recon_loss.data[0],
             'commit_loss': commit_loss.data[0],
             'unique_embeddings': emb_count.gt(0).sum(),
-            })
+            }, console=True)
 
         # make comparison image
-        if every_minute():
+        if lera.every(seconds=60):
             input = input.cpu()[0:8,:,:,:]
             w = input.size(-1)
             output = output.data.cpu()[0:8,:,:,:]
             result = (torch.stack([input, output])           # [2, 8, 3, w, w]
                         .transpose(0, 1).contiguous()        # [8, 2, 3, w, w]
                         .view(4, 4, 3, w, w)                 # [4, 4, 3, w, w]
-                        .permute(2, 0, 3, 1, 4).contiguous() # [3, 4, w, 4, w]
-                        .view(3, w * 4, w * 4))              # [3, w * 4, w * 4]
-            torchvision.transforms.ToPILImage()(result).save("images/step_{0:06d}.jpg".format(step))
+                        .permute(0, 3, 1, 4, 2).contiguous() # [4, w, 4, w, 3]
+                        .view(w * 4, w * 4, 3))              # [w * 4, w * 4, 3]
+            lera.log_image('reconstruction', result.numpy(), clip=(0, 1))
 
     # continue training
     if step < total_steps:
@@ -183,11 +191,8 @@ def train(epoch, step):
 
 ## Train
 
-every_second = utils.OnTime(1)
-every_minute = utils.OnTime(60)
-
-lrs.enabled(args.lrs)
-lrs.log_hyperparams({
+lera.enabled(args.lera)
+lera.log_hyperparams({
     'title' : "VQ-VAE",
     'dataset': dataset,
     'batch_size': batch_size,
@@ -197,7 +202,7 @@ lrs.log_hyperparams({
     'beta': beta,
     'total_steps' : total_steps
     })
-lrs.log_src(__file__)
+lera.log_file(__file__)
 
 enc = encoder(D) 
 dec = decoder(D)
